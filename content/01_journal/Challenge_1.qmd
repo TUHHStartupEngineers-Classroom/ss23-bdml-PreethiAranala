@@ -1,0 +1,93 @@
+library(tidyverse)
+library(tidyquant)
+library(broom)
+library(purrr)
+library(umap)
+library(ggplot2)
+library(dplyr)
+
+# STOCK PRICES
+sp_500_prices_tbl <- read_rds("01_journal/Business Decisions with Machine Learning/sp_500_prices_tbl.rds")
+sp_500_prices_tbl
+
+# SECTOR INFORMATION
+sp_500_index_tbl <- read_rds("01_journal/Business Decisions with Machine Learning/sp_500_index_tbl.rds")
+sp_500_index_tbl
+
+# Step 1
+sp_500_daily_returns_tbl <- sp_500_prices_tbl %>%
+  select(symbol, date, adjusted) %>%
+  filter(year(date) >= 2018) %>%
+  group_by(symbol) %>%
+  mutate(lag_adjusted = lag(adjusted)) %>%
+  na.omit() %>%
+  mutate(pct_return = (adjusted -lag_adjusted) / lag_adjusted) %>%
+  select(symbol, date, pct_return)
+sp_500_daily_returns_tbl
+
+# Step 2 Convert to User-Item Format
+stock_date_matrix_tbl <- sp_500_daily_returns_tbl %>%
+  spread(key = date, value = pct_return, fill = 0)
+
+# Create kmeans_obj for 4 centers
+stock_date_matrix_num_tbl <- stock_date_matrix_tbl[, sapply(stock_date_matrix_tbl, is.numeric)]
+
+kmeans_obj <- kmeans(stock_date_matrix_num_tbl, centers = 4, nstart = 20)
+t_withinss <- glance(kmeans_obj)$tot.withinss
+
+# Step 4
+kmeans_mapper <- function(center = 3) {
+  stock_date_matrix_num_tbl %>%
+    kmeans(centers = center, nstart = 20)
+}
+
+k_means_mapped_tbl <- tibble(centers = 1:30) %>%
+  mutate(
+    k_means = map(centers, kmeans_mapper),
+    glance = map(k_means, glance)
+  ) %>%
+  unnest(glance)
+
+# Plot Scree Plot
+scree_plot <- ggplot(k_means_mapped_tbl, aes(x = centers, y = tot.withinss)) +
+  geom_point() +
+  geom_line() +
+  labs(title = "Scree Plot") +
+  theme_bw()
+
+scree_plot
+
+# Step 5
+
+umap_results <- umap(stock_date_matrix_num_tbl)
+umap_tbl <- as_tibble(umap_results$layout)
+umap_results_tbl <- bind_cols(stock_date_matrix_tbl["symbol"], umap_tbl)
+                  
+umap_results_tbl %>%
+  ggplot(aes(x = V1, y = V2)) +
+  geom_point(alpha = 0.5) +
+  labs(title = "UMAP Projection") +
+  theme_tq()                                      
+
+# Step 6
+kmeans_10_obj <- k_means_mapped_tbl %>%
+  pull(k_means) %>%
+  pluck(10)
+  
+kmeans_10_clusters_tbl <- kmeans_10_obj %>% 
+  augment(stock_date_matrix_tbl) %>%
+  select(symbol, .cluster)
+
+
+umap_kmeans_results_tbl <- umap_results_tbl %>%
+  left_join(kmeans_10_clusters_tbl) %>% 
+  left_join(sp_500_index_tbl) %>%
+  select(symbol, company, sector, V1, V2, .cluster)
+
+## 
+
+ggplot(umap_kmeans_results_tbl, aes(x = V1, y = V2, color = .cluster)) +
+  geom_point(alpha = 0.5) +
+  scale_color_manual(values = palette_light() %>% rep(3)) +
+  labs(title = "K-Means and UMAP Results") +
+  theme_minimal()
